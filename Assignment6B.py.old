@@ -1,0 +1,244 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# <a href="https://colab.research.google.com/github/balsrini/Assignment6/blob/master/Assignment6A.ipynb" target="_parent"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
+
+# In[2]:
+
+from keras import backend as K
+import time
+import matplotlib.pyplot as plt
+import numpy as np
+np.random.seed(2017) 
+from keras.models import Sequential
+from keras.layers.convolutional import Convolution2D, MaxPooling2D
+from keras.layers import Activation, Flatten, Dense, Dropout
+from keras.layers.normalization import BatchNormalization
+from keras.utils import np_utils
+
+#import of the Grad Cam
+from keras.applications.vgg16 import VGG16, preprocess_input, decode_predictions
+from keras.preprocessing import image
+import keras.backend as K
+import cv2
+
+
+# In[3]:
+
+
+from keras.datasets import cifar10
+(train_features, train_labels), (test_features, test_labels) = cifar10.load_data()
+num_train, img_channels, img_rows, img_cols =  train_features.shape
+num_test, _, _, _ =  test_features.shape
+num_classes = len(np.unique(train_labels))
+
+
+# In[4]:
+
+
+class_names = ['airplane','automobile','bird','cat','deer',
+               'dog','frog','horse','ship','truck']
+fig = plt.figure(figsize=(8,3))
+for i in range(num_classes):
+    ax = fig.add_subplot(2, 5, 1 + i, xticks=[], yticks=[])
+    idx = np.where(train_labels[:]==i)[0]
+    features_idx = train_features[idx,::]
+    img_num = np.random.randint(features_idx.shape[0])
+    im = features_idx[img_num]
+    ax.set_title(class_names[i])
+    plt.imshow(im)
+plt.show()
+
+
+# In[5]:
+
+
+def plot_model_history(model_history):
+    fig, axs = plt.subplots(1,2,figsize=(15,5))
+    # summarize history for accuracy
+    axs[0].plot(range(1,len(model_history.history['acc'])+1),model_history.history['acc'])
+    axs[0].plot(range(1,len(model_history.history['val_acc'])+1),model_history.history['val_acc'])
+    axs[0].set_title('Model Accuracy')
+    axs[0].set_ylabel('Accuracy')
+    axs[0].set_xlabel('Epoch')
+    axs[0].set_xticks(np.arange(1,len(model_history.history['acc'])+1),len(model_history.history['acc'])/10)
+    axs[0].legend(['train', 'val'], loc='best')
+    # summarize history for loss
+    axs[1].plot(range(1,len(model_history.history['loss'])+1),model_history.history['loss'])
+    axs[1].plot(range(1,len(model_history.history['val_loss'])+1),model_history.history['val_loss'])
+    axs[1].set_title('Model Loss')
+    axs[1].set_ylabel('Loss')
+    axs[1].set_xlabel('Epoch')
+    axs[1].set_xticks(np.arange(1,len(model_history.history['loss'])+1),len(model_history.history['loss'])/10)
+    axs[1].legend(['train', 'val'], loc='best')
+    plt.show()
+
+
+# In[6]:
+
+
+def accuracy(test_x, test_y, model):
+    result = model.predict(test_x)
+    predicted_class = np.argmax(result, axis=1)
+    true_class = np.argmax(test_y, axis=1)
+    num_correct = np.sum(predicted_class == true_class) 
+    accuracy = float(num_correct)/result.shape[0]
+    return (accuracy * 100)
+
+
+# In[7]:
+
+
+train_features = train_features.astype('float32')/255
+test_features = test_features.astype('float32')/255
+# convert class labels to binary class labels
+train_labels = np_utils.to_categorical(train_labels, num_classes)
+test_labels = np_utils.to_categorical(test_labels, num_classes)
+
+
+# In[8]:
+
+
+# Define the model
+model = Sequential()
+model.add(Convolution2D(48, 3, 3, border_mode='same', input_shape=(32, 32, 3)))
+model.add(Activation('relu'))
+model.add(Convolution2D(48, 3, 3))
+model.add(Activation('relu'))
+model.add(Dropout(0.25))
+model.add(MaxPooling2D(pool_size=(2, 2)))
+
+model.add(Convolution2D(96, 3, 3, border_mode='same'))
+model.add(Activation('relu'))
+model.add(Convolution2D(96, 3, 3,name="gradCamlayer"))
+model.add(Activation('relu'))
+model.add(Dropout(0.25))
+model.add(MaxPooling2D(pool_size=(2, 2)))
+
+model.add(Convolution2D(192, 3, 3, border_mode='same'))
+model.add(Activation('relu'))
+model.add(Convolution2D(192, 3, 3))
+model.add(Activation('relu'))
+model.add(Dropout(0.25))
+model.add(MaxPooling2D(pool_size=(2, 2)))
+
+
+model.add(Convolution2D(10, 2, 2,name="lastlayer", activation='softmax'))
+
+model.add(Flatten())
+
+# Compile the model
+model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+
+
+# In[9]:
+model.summary()
+
+def get_random_eraser(p=0.5, s_l=0.02, s_h=0.4, r_1=0.3, r_2=1/0.3, v_l=0, v_h=255, pixel_level=False):
+    def eraser(input_img):
+        img_h, img_w, img_c = input_img.shape
+        p_1 = np.random.rand()
+
+        if p_1 > p:
+            return input_img
+
+        while True:
+            s = np.random.uniform(s_l, s_h) * img_h * img_w
+            r = np.random.uniform(r_1, r_2)
+            w = int(np.sqrt(s / r))
+            h = int(np.sqrt(s * r))
+            left = np.random.randint(0, img_w)
+            top = np.random.randint(0, img_h)
+
+            if left + w <= img_w and top + h <= img_h:
+                break
+
+        if pixel_level:
+            c = np.random.uniform(v_l, v_h, (h, w, img_c))
+        else:
+            c = np.random.uniform(v_l, v_h)
+
+        input_img[top:top + h, left:left + w, :] = c
+
+        return input_img
+
+    return eraser
+
+# In[10]:
+from keras.preprocessing.image import ImageDataGenerator
+datagen = ImageDataGenerator(zoom_range=0.0, horizontal_flip=False,preprocessing_function=get_random_eraser(v_l=0, v_h=1
+                                                                                                            
+                                                                                                            , pixel_level=False))
+# train the model
+start = time.time()
+# Train the model
+model_info = model.fit_generator(datagen.flow(train_features, train_labels, batch_size = 128),
+                                 samples_per_epoch = train_features.shape[0], nb_epoch = 5, 
+                                 validation_data = (test_features, test_labels), verbose=1)
+end = time.time()
+print ("Model took %0.2f seconds to train"%(end - start))
+# plot model history
+plot_model_history(model_info)
+# compute test accuracy
+print ("Accuracy on test data is: %0.2f"%accuracy(test_features, test_labels, model))
+
+# In[11]:
+(train_x_features, train_x_labels), (test_x_features, test_x_labels) = cifar10.load_data()
+
+def show_heatmap(index):
+    sample = np.copy(train_x_features[index,::])
+    x = np.copy(sample)
+    
+    
+    x = np.expand_dims(x, axis=0)
+    x= preprocess_input(x)
+    preds = model.predict(x)
+    class_idx = np.argmax (preds[0])
+    class_output = model.output[:,class_idx]
+    last_conv_layer = model.get_layer("gradCamlayer")
+    grads = K.gradients(class_output,last_conv_layer.output )[0]
+    pooled_grads = K.mean(grads,axis=(0,1,2))
+    iterate = K.function([model.input], [pooled_grads, last_conv_layer.output[0]])
+    pooled_grads_value, conv_layer_output_value = iterate([x])
+    for i in range(96):
+        conv_layer_output_value[:, :, i] *= pooled_grads_value[i]
+    heatmap = np.mean(conv_layer_output_value, axis = -1)
+    heatmap = np.maximum(heatmap, 0)
+    heatmap /= np.max(heatmap)
+    heatmap = cv2.resize(heatmap, (sample.shape[1], sample.shape[0]))
+    heatmap = np.uint8(255 * heatmap)
+    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+    superimposed_img = cv2.addWeighted(sample, 0.5, heatmap, 0.5, 0)
+    #from google.colab.patches import cv2_imshow
+    #cv2_imshow( sample)
+    #cv2_imshow(superimposed_img)
+    #plt.imshow(sample)
+    #plt.imshow(superimposed_img)
+    #plt.show()
+    return sample,superimposed_img
+    
+    
+# In[12]:
+#show_heatmap(12)
+fig1 = plt.figure(figsize=(8,3))    
+random_num  = np.random.randint(0,50000,5)
+counter = 0
+for randInt in random_num:    
+    (orig,heatmap) = show_heatmap(randInt)
+    ax = fig1.add_subplot(2, 5, 1 + counter, xticks=[], yticks=[])    
+    ax.set_title("Original Image " + str(randInt))
+    plt.imshow(orig)      
+    ax = fig1.add_subplot(2, 5, 1 + counter + 5, xticks=[], yticks=[])
+    counter = counter+ 1
+    plt.imshow(heatmap)    
+    #plt.imshow(heatmap)      
+plt.show()
+
+    
+#plt.show()
+
+
+
+
+
+
